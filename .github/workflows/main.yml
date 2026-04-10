@@ -39,7 +39,62 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ── 1. Add Kali Linux rolling repository ─────────────────────────────
+      # ── 1. Prep: pin Ubuntu system packages BEFORE adding Kali repo ───────
+      #
+      # ROOT CAUSE OF THE ERROR:
+      #   Kali's base-files does dpkg-divert on /lib32 → /lib32.usr-is-merged
+      #   Ubuntu's base-files already diverted /lib32 → /.lib32.usr-is-merged
+      #   Two conflicting diversions = fatal dpkg error, exit 100.
+      #
+      # FIX — two layers:
+      #   1. apt preferences  → Ubuntu packages always win (priority 900 vs 100)
+      #   2. apt-mark hold    → hard-lock core system packages so apt never
+      #                         even tries to upgrade them from Kali
+      - name: Configure apt pinning & hold system packages
+        run: |
+          # Layer 1 — apt preferences (Kali tools install, system stays Ubuntu)
+          sudo tee /etc/apt/preferences.d/99-kali-pin > /dev/null << 'EOF'
+Package: *
+Pin: release o=Ubuntu
+Pin-Priority: 900
+
+Package: *
+Pin: release o=Kali
+Pin-Priority: 100
+EOF
+
+          # Layer 2 — hard hold packages whose dpkg-divert would clash
+          sudo apt-mark hold \
+            base-files \
+            base-passwd \
+            libc6 \
+            libc-bin \
+            libc6-dev \
+            dpkg \
+            apt \
+            apt-utils \
+            perl-base \
+            login \
+            passwd \
+            util-linux \
+            mount \
+            init-system-helpers \
+            systemd \
+            libsystemd0 \
+            udev \
+            bash \
+            dash \
+            grep \
+            sed \
+            tar \
+            gzip \
+            coreutils \
+            findutils \
+            diffutils
+
+          echo "Pinning & holds applied — Ubuntu system packages are protected."
+
+      # ── 2. Add Kali Linux rolling repository ─────────────────────────────
       - name: Add Kali Linux repository
         run: |
           sudo apt-get update -qq
@@ -53,7 +108,7 @@ jobs:
 
           sudo apt-get update -qq
 
-      # ── 2. Install XFCE desktop ───────────────────────────────────────────
+      # ── 3. Install XFCE desktop ───────────────────────────────────────────
       - name: Install XFCE desktop
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -66,14 +121,16 @@ jobs:
             x11-xserver-utils \
             xorg
 
-      # ── 3. Install Kali top-10 tools ──────────────────────────────────────
+      # ── 4. Install Kali top-10 tools ──────────────────────────────────────
+      # Uses -t kali-rolling to explicitly pull from the Kali repo.
+      # Held Ubuntu packages are skipped automatically.
       - name: Install Kali tools
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo -E apt-get install -y kali-tools-top10 || true
+          sudo -E apt-get install -y -t kali-rolling kali-tools-top10 || true
 
-      # ── 4. Install Chrome Remote Desktop ──────────────────────────────────
+      # ── 5. Install Chrome Remote Desktop ──────────────────────────────────
       - name: Install Chrome Remote Desktop
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -82,7 +139,7 @@ jobs:
             "https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb"
           sudo -E apt-get install -y /tmp/crd.deb
 
-      # ── 5. Install Google Chrome ───────────────────────────────────────────
+      # ── 6. Install Google Chrome ───────────────────────────────────────────
       - name: Install Google Chrome
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -91,26 +148,20 @@ jobs:
             "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
           sudo -E apt-get install -y /tmp/chrome.deb
 
-      # ── 6. Configure XFCE as the CRD session ──────────────────────────────
-      # CRD looks for ~/.chrome-remote-desktop-session of the SAME user
-      # that ran start-host — that is the default runner user, NOT a custom one.
+      # ── 7. Configure XFCE as the CRD session ──────────────────────────────
       - name: Configure XFCE session
         run: |
           cat > "$HOME/.chrome-remote-desktop-session" << 'SESS'
-          #!/bin/bash
-          export XKL_XMODMAP_DISABLE=1
-          exec /usr/bin/startxfce4
-          SESS
+#!/bin/bash
+export XKL_XMODMAP_DISABLE=1
+exec /usr/bin/startxfce4
+SESS
           chmod +x "$HOME/.chrome-remote-desktop-session"
 
-          # Add runner user to the CRD group
           sudo usermod -aG chrome-remote-desktop "$USER" || true
+          echo "Session configured for: $USER ($HOME)"
 
-          echo "Session file written for user: $USER  ($HOME)"
-
-      # ── 7. Authorize CRD — PIN piped via stdin ────────────────────────────
-      # start-host prompts for the PIN twice interactively.
-      # printf feeds both prompts so the step is fully non-interactive.
+      # ── 8. Authorize CRD — PIN piped via stdin ────────────────────────────
       - name: Authorize Chrome Remote Desktop
         run: |
           PIN="${{ github.event.inputs.rdp_pin }}"
@@ -126,7 +177,7 @@ jobs:
 
           echo "CRD authorization done."
 
-      # ── 8. Start CRD daemon ───────────────────────────────────────────────
+      # ── 9. Start CRD daemon ───────────────────────────────────────────────
       - name: Start Chrome Remote Desktop daemon
         run: |
           sudo systemctl enable  chrome-remote-desktop@"$USER" 2>/dev/null || true
@@ -136,7 +187,7 @@ jobs:
           sleep 3
           sudo systemctl status chrome-remote-desktop@"$USER" --no-pager || true
 
-      # ── 9. Connection info ────────────────────────────────────────────────
+      # ── 10. Connection info ───────────────────────────────────────────────
       - name: Print connection info
         run: |
           echo ""
@@ -147,8 +198,7 @@ jobs:
           echo "  PIN : ${{ github.event.inputs.rdp_pin }}"
           echo "  Duration: ${{ github.event.inputs.tunnel_duration }}s"
           echo "==========================================="
-          echo ""
 
-      # ── 10. Keep runner alive ─────────────────────────────────────────────
+      # ── 11. Keep runner alive ─────────────────────────────────────────────
       - name: Keep session alive
         run: sleep "${{ github.event.inputs.tunnel_duration }}"
