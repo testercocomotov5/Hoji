@@ -1,34 +1,19 @@
-name: Kali Linux RDP — Chrome Remote Desktop + XFCE
-
-# ┌─────────────────────────────────────────────────────────────────┐
-# │  HOW TO GET YOUR CRD AUTH COMMAND (do this right before run):  │
-# │  1. Open https://remotedesktop.google.com/headless              │
-# │  2. Click  Begin → Next → Authorize  (sign in with Google)      │
-# │  3. Copy the full Debian command shown — it looks like:         │
-# │     DISPLAY= /opt/google/chrome-remote-desktop/start-host \    │
-# │       --code="4/0Axxx" --redirect-url="https://..." --name=""  │
-# │  4. Paste it into the "CRD Auth Command" input below.           │
-# │  ⚠  The code expires in ~5 min — paste & click Run immediately │
-# └─────────────────────────────────────────────────────────────────┘
+name: Kali Linux RDP - Chrome Remote Desktop + XFCE
 
 on:
   workflow_dispatch:
     inputs:
       crd_auth_command:
-        description: >
-          CRD Auth Command — from https://remotedesktop.google.com/headless
-          (Begin → Next → Authorize → copy the full Debian command shown)
+        description: "CRD command from https://remotedesktop.google.com/headless (Begin > Next > Authorize > copy the Debian command)"
         required: true
         type: string
-
       rdp_pin:
         description: "Remote Desktop PIN (min 6 digits, numbers only)"
         required: true
         default: "123456"
         type: string
-
       tunnel_duration:
-        description: "Session duration in seconds (max 21600 = 6 h)"
+        description: "Session duration in seconds (max 21600 = 6h)"
         required: true
         default: "21600"
         type: string
@@ -39,62 +24,24 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ── 1. Prep: pin Ubuntu system packages BEFORE adding Kali repo ───────
-      #
-      # ROOT CAUSE OF THE ERROR:
-      #   Kali's base-files does dpkg-divert on /lib32 → /lib32.usr-is-merged
-      #   Ubuntu's base-files already diverted /lib32 → /.lib32.usr-is-merged
-      #   Two conflicting diversions = fatal dpkg error, exit 100.
-      #
-      # FIX — two layers:
-      #   1. apt preferences  → Ubuntu packages always win (priority 900 vs 100)
-      #   2. apt-mark hold    → hard-lock core system packages so apt never
-      #                         even tries to upgrade them from Kali
-      - name: Configure apt pinning & hold system packages
+      - name: Configure apt pinning to prevent Kali base-files clash
         run: |
-          # Layer 1 — apt preferences (Kali tools install, system stays Ubuntu)
-          sudo tee /etc/apt/preferences.d/99-kali-pin > /dev/null << 'EOF'
-Package: *
-Pin: release o=Ubuntu
-Pin-Priority: 900
+          printf 'Package: *\nPin: release o=Ubuntu\nPin-Priority: 900\n\nPackage: *\nPin: release o=Kali\nPin-Priority: 100\n' \
+            | sudo tee /etc/apt/preferences.d/99-kali-pin > /dev/null
 
-Package: *
-Pin: release o=Kali
-Pin-Priority: 100
-EOF
-
-          # Layer 2 — hard hold packages whose dpkg-divert would clash
           sudo apt-mark hold \
-            base-files \
-            base-passwd \
-            libc6 \
-            libc-bin \
-            libc6-dev \
-            dpkg \
-            apt \
-            apt-utils \
-            perl-base \
-            login \
-            passwd \
-            util-linux \
-            mount \
+            base-files base-passwd \
+            libc6 libc-bin libc6-dev \
+            dpkg apt apt-utils \
+            perl-base login passwd \
+            util-linux mount \
             init-system-helpers \
-            systemd \
-            libsystemd0 \
-            udev \
-            bash \
-            dash \
-            grep \
-            sed \
-            tar \
-            gzip \
-            coreutils \
-            findutils \
-            diffutils
+            systemd libsystemd0 udev \
+            bash dash grep sed tar gzip \
+            coreutils findutils diffutils
 
-          echo "Pinning & holds applied — Ubuntu system packages are protected."
+          echo "Pinning done — Ubuntu system packages are protected from Kali overrides."
 
-      # ── 2. Add Kali Linux rolling repository ─────────────────────────────
       - name: Add Kali Linux repository
         run: |
           sudo apt-get update -qq
@@ -108,86 +55,61 @@ EOF
 
           sudo apt-get update -qq
 
-      # ── 3. Install XFCE desktop ───────────────────────────────────────────
       - name: Install XFCE desktop
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-terminal \
-            dbus-x11 \
-            x11-xserver-utils \
-            xorg
+            xfce4 xfce4-goodies xfce4-terminal \
+            dbus-x11 x11-xserver-utils xorg
 
-      # ── 4. Install Kali top-10 tools ──────────────────────────────────────
-      # Uses -t kali-rolling to explicitly pull from the Kali repo.
-      # Held Ubuntu packages are skipped automatically.
-      - name: Install Kali tools
+      - name: Install Kali top-10 tools
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get install -y -t kali-rolling kali-tools-top10 || true
 
-      # ── 5. Install Chrome Remote Desktop ──────────────────────────────────
       - name: Install Chrome Remote Desktop
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          wget -qO /tmp/crd.deb \
-            "https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb"
+          wget -qO /tmp/crd.deb "https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb"
           sudo -E apt-get install -y /tmp/crd.deb
 
-      # ── 6. Install Google Chrome ───────────────────────────────────────────
       - name: Install Google Chrome
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          wget -qO /tmp/chrome.deb \
-            "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+          wget -qO /tmp/chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
           sudo -E apt-get install -y /tmp/chrome.deb
 
-      # ── 7. Configure XFCE as the CRD session ──────────────────────────────
-      - name: Configure XFCE session
+      - name: Configure XFCE session for CRD
         run: |
-          cat > "$HOME/.chrome-remote-desktop-session" << 'SESS'
-#!/bin/bash
-export XKL_XMODMAP_DISABLE=1
-exec /usr/bin/startxfce4
-SESS
+          printf '#!/bin/bash\nexport XKL_XMODMAP_DISABLE=1\nexec /usr/bin/startxfce4\n' \
+            > "$HOME/.chrome-remote-desktop-session"
           chmod +x "$HOME/.chrome-remote-desktop-session"
-
           sudo usermod -aG chrome-remote-desktop "$USER" || true
           echo "Session configured for: $USER ($HOME)"
 
-      # ── 8. Authorize CRD — PIN piped via stdin ────────────────────────────
       - name: Authorize Chrome Remote Desktop
         run: |
           PIN="${{ github.event.inputs.rdp_pin }}"
-
           if ! [[ "$PIN" =~ ^[0-9]{6,}$ ]]; then
             echo "ERROR: PIN must be at least 6 digits (numbers only)."
             exit 1
           fi
+          echo "Authorizing CRD..."
+          printf '%s\n%s\n' "$PIN" "$PIN" | DISPLAY= ${{ github.event.inputs.crd_auth_command }}
+          echo "CRD authorization complete."
 
-          echo "Authorizing CRD host..."
-          printf '%s\n%s\n' "$PIN" "$PIN" | \
-            DISPLAY= ${{ github.event.inputs.crd_auth_command }}
-
-          echo "CRD authorization done."
-
-      # ── 9. Start CRD daemon ───────────────────────────────────────────────
       - name: Start Chrome Remote Desktop daemon
         run: |
           sudo systemctl enable  chrome-remote-desktop@"$USER" 2>/dev/null || true
           sudo systemctl restart chrome-remote-desktop@"$USER" 2>/dev/null || \
-            /opt/google/chrome-remote-desktop/chrome-remote-desktop --start   || true
-
+            /opt/google/chrome-remote-desktop/chrome-remote-desktop --start || true
           sleep 3
           sudo systemctl status chrome-remote-desktop@"$USER" --no-pager || true
 
-      # ── 10. Connection info ───────────────────────────────────────────────
       - name: Print connection info
         run: |
           echo ""
@@ -196,9 +118,8 @@ SESS
           echo "==========================================="
           echo "  URL : https://remotedesktop.google.com/"
           echo "  PIN : ${{ github.event.inputs.rdp_pin }}"
-          echo "  Duration: ${{ github.event.inputs.tunnel_duration }}s"
+          echo "  Time: ${{ github.event.inputs.tunnel_duration }}s remaining"
           echo "==========================================="
 
-      # ── 11. Keep runner alive ─────────────────────────────────────────────
       - name: Keep session alive
         run: sleep "${{ github.event.inputs.tunnel_duration }}"
