@@ -1,0 +1,131 @@
+name: Windows RDP - Kali WSL CLI + Chrome Remote Desktop
+
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │  HOW TO GET YOUR CRD COMMAND:                                        │
+# │  1. Open https://remotedesktop.google.com/headless                   │
+# │  2. Click  Begin → Next → Authorize  (sign in with Google)           │
+# │  3. Copy the full Debian command shown and paste it as-is            │
+# │  ⚠  Code expires in ~5 min — paste & Run immediately                │
+# └──────────────────────────────────────────────────────────────────────┘
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_auth_command:
+        description: "Full CRD command from https://remotedesktop.google.com/headless — paste the entire Debian command as-is"
+        required: true
+        type: string
+      rdp_pin:
+        description: "Remote Desktop PIN (min 6 digits, numbers only)"
+        required: true
+        default: "123456"
+        type: string
+      tunnel_duration:
+        description: "Session duration in seconds (max 21600 = 6h)"
+        required: true
+        default: "21600"
+        type: string
+
+jobs:
+  windows-kali-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Enable WSL2 features
+        shell: powershell
+        run: |
+          dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+          dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+          wsl --set-default-version 2
+          Write-Host "WSL2 enabled."
+
+      - name: Install Kali Linux WSL (CLI only)
+        shell: powershell
+        run: |
+          wsl --install -d kali-linux --no-launch
+          Write-Host "Kali Linux WSL installed."
+
+      - name: Install Chrome Remote Desktop (Windows host)
+        shell: powershell
+        run: |
+          $crdUrl = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+          $crdMsi = "$env:TEMP\crd-host.msi"
+          Write-Host "Downloading CRD host..."
+          Invoke-WebRequest -Uri $crdUrl -OutFile $crdMsi -UseBasicParsing
+          Write-Host "Installing CRD host..."
+          Start-Process msiexec.exe -ArgumentList "/i `"$crdMsi`" /quiet /norestart" -Wait -NoNewWindow
+          Write-Host "CRD host installed."
+
+      - name: Authorize Chrome Remote Desktop
+        shell: powershell
+        run: |
+          $pin         = "${{ github.event.inputs.rdp_pin }}"
+          $fullCommand = '${{ github.event.inputs.crd_auth_command }}'
+
+          # Validate PIN
+          if ($pin -notmatch '^\d{6,}$') {
+            Write-Error "PIN must be at least 6 digits (numbers only)."
+            exit 1
+          }
+
+          # Parse --code and --redirect-url out of the pasted Linux command
+          $code        = [regex]::Match($fullCommand, '--code="([^"]+)"').Groups[1].Value
+          $redirectUrl = [regex]::Match($fullCommand, '--redirect-url="([^"]+)"').Groups[1].Value
+
+          if (-not $code -or -not $redirectUrl) {
+            Write-Error "Could not extract --code or --redirect-url from the pasted command. Make sure you copied the full Debian command from the headless page."
+            exit 1
+          }
+
+          Write-Host "Code found:        $($code.Substring(0, [Math]::Min(20, $code.Length)))..."
+          Write-Host "Redirect URL found: $($redirectUrl.Substring(0, [Math]::Min(40, $redirectUrl.Length)))..."
+
+          # Find remoting_start_host.exe
+          $crdDir  = "C:\Program Files\Google\Chrome Remote Desktop"
+          $hostExe = Get-ChildItem -Path $crdDir -Recurse -Filter "remoting_start_host.exe" `
+                       -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $hostExe) {
+            Write-Error "remoting_start_host.exe not found in $crdDir"
+            exit 1
+          }
+
+          Write-Host "Registering with CRD using: $hostExe"
+          & "$hostExe" --code="$code" --redirect-url="$redirectUrl" --name="kali-wsl-actions" --pin="$pin"
+          Write-Host "CRD authorization complete."
+
+      - name: Verify CRD service
+        shell: powershell
+        run: |
+          $svc = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+          if ($svc) {
+            Write-Host "CRD service status: $($svc.Status)"
+            if ($svc.Status -ne "Running") {
+              Start-Service -Name "chromoting"
+              Write-Host "CRD service started."
+            }
+          } else {
+            Write-Host "chromoting service not found, listing remote-related services..."
+            Get-Service | Where-Object { $_.DisplayName -like "*remote*" } | Format-Table Name, Status, DisplayName
+          }
+
+      - name: Print connection info
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "==========================================="
+          Write-Host "  CHROME REMOTE DESKTOP IS READY"
+          Write-Host "==========================================="
+          Write-Host "  URL      : https://remotedesktop.google.com/"
+          Write-Host "  PIN      : ${{ github.event.inputs.rdp_pin }}"
+          Write-Host "  Duration : ${{ github.event.inputs.tunnel_duration }}s"
+          Write-Host "==========================================="
+          Write-Host ""
+          Write-Host "  To enter Kali, open Windows Terminal and run:"
+          Write-Host "    wsl -d kali-linux"
+          Write-Host ""
+
+      - name: Keep session alive
+        shell: powershell
+        run: Start-Sleep -Seconds ${{ github.event.inputs.tunnel_duration }}
